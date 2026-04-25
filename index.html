@@ -4491,6 +4491,56 @@
   const REPO_OWNER = 'morimoto-sho';
   const REPO_NAME  = 'shiawase-machi-nite';
   const FILE_PATH  = 'index.html';
+  const ENCRYPTED_TOKEN = {"salt": "TyYiLXjzK/5eR5zX1WQP/w==", "iv": "aaGzOMHrS40yONzv", "ct": "UbAgfOVduSPnVPH5EjJ6K5kbSbRCe3kZXijtIp6H63XZLZ+TOn0efJ6XVqy8foYaYm2+SIpO/ko=", "iter": 200000};
+
+  function b64ToBytes(b64) {
+    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  }
+
+  async function unlockToken(password) {
+    if (!ENCRYPTED_TOKEN) return null;
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    try {
+      const passKey = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+      );
+      const key = await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt: b64ToBytes(ENCRYPTED_TOKEN.salt),
+          iterations: ENCRYPTED_TOKEN.iter,
+          hash: 'SHA-256',
+        },
+        passKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt']
+      );
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: b64ToBytes(ENCRYPTED_TOKEN.iv) },
+        key,
+        b64ToBytes(ENCRYPTED_TOKEN.ct)
+      );
+      return dec.decode(plain);
+    } catch (e) {
+      return null; // 復号失敗 = パスワード違い
+    }
+  }
+
+  async function getToken() {
+    let token = sessionStorage.getItem('gh_token_session');
+    if (token) return token;
+    const password = prompt('パスワードを入力してください');
+    if (!password) return null;
+    token = await unlockToken(password);
+    if (!token) {
+      alert('パスワードが違います');
+      return null;
+    }
+    sessionStorage.setItem('gh_token_session', token);
+    return token;
+  }
 
   function toggleEdit() {
     const editing = document.body.classList.toggle('editing');
@@ -4516,11 +4566,10 @@
   }
 
   async function saveToGitHub() {
-    let token = localStorage.getItem('gh_token');
+    const token = await getToken();
     if (!token) {
-      token = prompt('GitHub Personal Access Token を入力してください\n（Fine-grained PAT 推奨：このリポジトリのみ Contents: Read+Write 権限）');
-      if (!token) return;
-      localStorage.setItem('gh_token', token);
+      setStatus('× キャンセル / パスワード未認証', 'error');
+      return;
     }
 
     setStatus('保存中…');
@@ -4560,8 +4609,8 @@
       const getRes = await fetch(apiBase + '?ref=main', { headers });
       if (!getRes.ok) {
         if (getRes.status === 401) {
-          localStorage.removeItem('gh_token');
-          throw new Error('認証エラー（401）。トークンを再入力してください。');
+          sessionStorage.removeItem('gh_token_session');
+          throw new Error('認証エラー（401）。再度パスワードを入れて保存し直してください。');
         }
         throw new Error('GET 失敗: ' + getRes.status);
       }
