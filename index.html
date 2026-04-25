@@ -307,6 +307,56 @@
     background: var(--accent-soft);
     color: var(--bg);
   }
+
+  /* === 編集モード === */
+  body.editing main p,
+  body.editing main h2,
+  body.editing main .title-main,
+  body.editing main .title-sub {
+    outline: 1px dashed transparent;
+    transition: outline 0.15s, background 0.15s;
+    cursor: text;
+  }
+  body.editing main p:hover,
+  body.editing main h2:hover {
+    outline-color: var(--accent-soft);
+    background: rgba(184, 160, 128, 0.08);
+  }
+  body.editing main p:focus,
+  body.editing main h2:focus {
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+    background: rgba(184, 160, 128, 0.12);
+  }
+  body.editing header {
+    border-bottom-color: var(--accent);
+    background: var(--bg-elevated);
+  }
+  body.editing header::after {
+    content: "編集モード";
+    position: absolute;
+    bottom: -22px;
+    left: 24px;
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.3em;
+  }
+  .save-btn {
+    background: var(--accent) !important;
+    color: var(--bg) !important;
+    border-color: var(--accent) !important;
+  }
+  .save-btn:hover {
+    opacity: 0.85;
+  }
+  .save-status {
+    font-size: 12px;
+    color: var(--text-soft);
+    margin-left: 12px;
+    letter-spacing: 0.05em;
+  }
+  .save-status.success { color: #5a8a5a; }
+  .save-status.error { color: #b04040; }
 </style>
 </head>
 <body>
@@ -318,6 +368,9 @@
   <div class="controls">
     <button onclick="toggleVertical()">縦書き</button>
     <button onclick="toggleDark()">配色</button>
+    <button id="edit-toggle" onclick="toggleEdit()">編集</button>
+    <button id="save-btn" class="save-btn" style="display:none" onclick="saveToGitHub()">保存</button>
+    <span id="save-status" class="save-status"></span>
   </div>
 </header>
 
@@ -4433,6 +4486,123 @@
     });
   }, { rootMargin: '-40% 0px -55% 0px' });
   sections.forEach(s => observer.observe(s));
+
+  // === 編集モード ===
+  const REPO_OWNER = 'morimoto-sho';
+  const REPO_NAME  = 'shiawase-machi-nite';
+  const FILE_PATH  = 'index.html';
+
+  function toggleEdit() {
+    const editing = document.body.classList.toggle('editing');
+    const editables = document.querySelectorAll('main p, main h2, main .title-main, main .title-sub');
+    editables.forEach(el => {
+      if (editing) {
+        el.setAttribute('contenteditable', 'true');
+        el.setAttribute('spellcheck', 'false');
+      } else {
+        el.removeAttribute('contenteditable');
+        el.removeAttribute('spellcheck');
+      }
+    });
+    document.getElementById('edit-toggle').textContent = editing ? '閲覧' : '編集';
+    document.getElementById('save-btn').style.display = editing ? 'inline-block' : 'none';
+    setStatus('');
+  }
+
+  function setStatus(msg, kind) {
+    const el = document.getElementById('save-status');
+    el.textContent = msg;
+    el.className = 'save-status' + (kind ? ' ' + kind : '');
+  }
+
+  async function saveToGitHub() {
+    let token = localStorage.getItem('gh_token');
+    if (!token) {
+      token = prompt('GitHub Personal Access Token を入力してください\n（Fine-grained PAT 推奨：このリポジトリのみ Contents: Read+Write 権限）');
+      if (!token) return;
+      localStorage.setItem('gh_token', token);
+    }
+
+    setStatus('保存中…');
+    document.getElementById('save-btn').disabled = true;
+
+    try {
+      // 一旦編集モードを閉じてから現状のHTMLを取り出す
+      const wasEditing = document.body.classList.contains('editing');
+      if (wasEditing) {
+        document.querySelectorAll('[contenteditable]').forEach(el => {
+          el.removeAttribute('contenteditable');
+          el.removeAttribute('spellcheck');
+        });
+      }
+
+      // body の editing クラスは保存後に戻す。HTMLには含めない
+      document.body.classList.remove('editing');
+      const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+      if (wasEditing) {
+        document.body.classList.add('editing');
+        document.querySelectorAll('main p, main h2, main .title-main, main .title-sub').forEach(el => {
+          el.setAttribute('contenteditable', 'true');
+          el.setAttribute('spellcheck', 'false');
+        });
+      }
+
+      // base64
+      const content = btoa(unescape(encodeURIComponent(html)));
+
+      const apiBase = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FILE_PATH}`;
+      const headers = {
+        'Authorization': 'token ' + token,
+        'Accept': 'application/vnd.github+json'
+      };
+
+      // 既存ファイルの SHA を取得
+      const getRes = await fetch(apiBase + '?ref=main', { headers });
+      if (!getRes.ok) {
+        if (getRes.status === 401) {
+          localStorage.removeItem('gh_token');
+          throw new Error('認証エラー（401）。トークンを再入力してください。');
+        }
+        throw new Error('GET 失敗: ' + getRes.status);
+      }
+      const meta = await getRes.json();
+      const sha = meta.sha;
+
+      // PUT で commit
+      const ts = new Date().toLocaleString('ja-JP');
+      const putRes = await fetch(apiBase, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: 'edit via web (' + ts + ')',
+          content: content,
+          sha: sha,
+          branch: 'main'
+        })
+      });
+      if (!putRes.ok) {
+        throw new Error('PUT 失敗: ' + putRes.status);
+      }
+      const result = await putRes.json();
+      const commitSha = result.commit.sha.substring(0, 7);
+      setStatus('✓ 保存しました（' + commitSha + '）', 'success');
+    } catch (e) {
+      console.error(e);
+      setStatus('× ' + e.message, 'error');
+    } finally {
+      document.getElementById('save-btn').disabled = false;
+    }
+  }
+
+  // Cmd+S / Ctrl+S で保存（編集モード時のみ）
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      if (document.body.classList.contains('editing')) {
+        e.preventDefault();
+        saveToGitHub();
+      }
+    }
+  });
 </script>
 </body>
 </html>
